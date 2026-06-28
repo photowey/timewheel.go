@@ -58,6 +58,7 @@ jobs:
           go run ./examples/cancel
           go run ./examples/custom_pools
           go run ./examples/backpressure
+          go run ./examples/metrics
 
       - name: Run benchmark smoke test
         run: go test -run '^$' -bench='BenchmarkSchedule' -benchmem -benchtime=100ms -count=1 ./pkg/timewheel

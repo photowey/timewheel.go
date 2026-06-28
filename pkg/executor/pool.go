@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Pool is a bounded goroutine pool.
@@ -28,16 +29,20 @@ type Pool struct {
 	queueCapacity int
 	rejectPolicy  RejectPolicy
 	panicHandler  PanicHandler
+	metricSink    MetricSink
 
-	queue       queue
-	metrics     metrics
-	workersDone sync.WaitGroup
-	submitsDone sync.WaitGroup
-	done        chan struct{}
-	shutdownC   chan struct{}
-	submitMu    sync.Mutex
-	isClosed    atomic.Bool
-	closeOnce   sync.Once
+	metricReportInterval time.Duration
+
+	queue              queue
+	metrics            metrics
+	workersDone        sync.WaitGroup
+	submitsDone        sync.WaitGroup
+	done               chan struct{}
+	shutdownC          chan struct{}
+	metricReporterDone chan struct{}
+	submitMu           sync.Mutex
+	isClosed           atomic.Bool
+	closeOnce          sync.Once
 }
 
 // New creates a Pool and starts its worker goroutines.
@@ -55,17 +60,24 @@ func New(opts ...Option) (*Pool, error) {
 		queueCapacity: cfg.queueCapacity,
 		rejectPolicy:  cfg.rejectPolicy,
 		panicHandler:  cfg.panicHandler,
-		queue:         newQueue(cfg.queueCapacity),
-		done:          make(chan struct{}),
-		shutdownC:     make(chan struct{}),
+		metricSink:    cfg.metricSink,
+
+		metricReportInterval: cfg.metricReportInterval,
+		queue:                newQueue(cfg.queueCapacity),
+		done:                 make(chan struct{}),
+		shutdownC:            make(chan struct{}),
 	}
 	p.metrics.workers = cfg.workers
+	if cfg.metricSink != nil {
+		p.metricReporterDone = make(chan struct{})
+	}
 
 	p.workersDone.Add(cfg.workers)
 	for range cfg.workers {
 		go p.worker()
 	}
 	go p.closeDoneWhenWorkersExit()
+	p.startMetricReporter()
 
 	return p, nil
 }
@@ -178,10 +190,10 @@ func (p *Pool) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-p.done:
-		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	return p.waitMetricReporter(ctx)
 }
 
 // Metrics returns an immutable point-in-time snapshot of pool counters.

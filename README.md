@@ -65,7 +65,7 @@ func main() {
 - Reject or block backpressure policy for scheduling.
 - Reject or retry policy for worker dispatch saturation.
 - Logical cancellation through `Timeout.Cancel`.
-- Metrics snapshots for timers and executor pools.
+- Metrics snapshots for timers and executor pools, with optional metric sinks.
 
 ## Documentation
 
@@ -76,6 +76,7 @@ func main() {
   - [cancel](examples/cancel)
   - [custom pools](examples/custom_pools)
   - [backpressure](examples/backpressure)
+  - [metrics](examples/metrics)
 
 ## License
 

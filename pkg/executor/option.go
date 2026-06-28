@@ -17,11 +17,13 @@ package executor
 import (
 	"fmt"
 	"runtime"
+	"time"
 )
 
 const (
-	defaultName          = "executor"
-	defaultQueueCapacity = 1024
+	defaultName                 = "executor"
+	defaultQueueCapacity        = 1024
+	defaultMetricReportInterval = 10 * time.Second
 )
 
 // Option configures a Pool.
@@ -35,14 +37,18 @@ type options struct {
 	queueCapacity int
 	rejectPolicy  RejectPolicy
 	panicHandler  PanicHandler
+
+	metricSink           MetricSink
+	metricReportInterval time.Duration
 }
 
 func defaultOptions() options {
 	return options{
-		name:          defaultName,
-		workers:       runtime.GOMAXPROCS(0),
-		queueCapacity: defaultQueueCapacity,
-		rejectPolicy:  RejectPolicyReject,
+		name:                 defaultName,
+		workers:              runtime.GOMAXPROCS(0),
+		queueCapacity:        defaultQueueCapacity,
+		rejectPolicy:         RejectPolicyReject,
+		metricReportInterval: defaultMetricReportInterval,
 	}
 }
 
@@ -120,4 +126,36 @@ func (opt panicHandlerOption) apply(o *options) error {
 // WithPanicHandler sets the callback invoked after worker panic recovery.
 func WithPanicHandler(handler PanicHandler) Option {
 	return panicHandlerOption{handler: handler}
+}
+
+type metricSinkOption struct {
+	sink MetricSink
+}
+
+func (opt metricSinkOption) apply(o *options) error {
+	if opt.sink == nil {
+		return fmt.Errorf("executor: validate metric sink: %w", ErrInvalid)
+	}
+	o.metricSink = opt.sink
+	return nil
+}
+
+// WithMetricSink sets the optional sink for periodic pool metric snapshots.
+func WithMetricSink(sink MetricSink) Option {
+	return metricSinkOption{sink: sink}
+}
+
+type metricReportIntervalOption time.Duration
+
+func (opt metricReportIntervalOption) apply(o *options) error {
+	if opt <= 0 {
+		return fmt.Errorf("executor: validate metric report interval: %w", ErrInvalid)
+	}
+	o.metricReportInterval = time.Duration(opt)
+	return nil
+}
+
+// WithMetricReportInterval sets how often a configured MetricSink receives snapshots.
+func WithMetricReportInterval(interval time.Duration) Option {
+	return metricReportIntervalOption(interval)
 }

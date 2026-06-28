@@ -34,24 +34,27 @@ type Timer struct {
 	backpressurePolicy    BackpressurePolicy
 	expiredTaskPolicy     ExpiredTaskPolicy
 	expiredTaskRetryDelay time.Duration
+	metricSink            MetricSink
+	metricReportInterval  time.Duration
 
 	bossPool      *executor.Pool
 	workerPool    *executor.Pool
 	ownBossPool   bool
 	ownWorkerPool bool
 
-	commands      chan command
-	commandSlots  chan struct{}
-	shutdownC     chan struct{}
-	schedulerDone chan struct{}
-	delayQueue    *timingwheel.BucketDelayQueue
-	wheel         *timingwheel.TimingWheel
-	clock         timingwheel.Clock
-	metrics       metrics
-	enqueueMu     sync.Mutex
-	enqueuesDone  sync.WaitGroup
-	isClosed      atomic.Bool
-	closeOnce     sync.Once
+	commands           chan command
+	commandSlots       chan struct{}
+	shutdownC          chan struct{}
+	schedulerDone      chan struct{}
+	metricReporterDone chan struct{}
+	delayQueue         *timingwheel.BucketDelayQueue
+	wheel              *timingwheel.TimingWheel
+	clock              timingwheel.Clock
+	metrics            metrics
+	enqueueMu          sync.Mutex
+	enqueuesDone       sync.WaitGroup
+	isClosed           atomic.Bool
+	closeOnce          sync.Once
 }
 
 type schedulerTask struct {
@@ -81,6 +84,7 @@ func New(opts ...Option) (*Timer, error) {
 		_ = timer.closeOwnedPools(context.Background())
 		return nil, fmt.Errorf("timewheel: start scheduler: %w", err)
 	}
+	timer.startMetricReporter()
 	return timer, nil
 }
 
@@ -111,7 +115,7 @@ func newTimer(cfg options) (*Timer, error) {
 		ownWorkerPool = true
 	}
 
-	return &Timer{
+	timer := &Timer{
 		tick:                  cfg.tick,
 		bucketCount:           cfg.bucketCount,
 		commandCapacity:       cfg.commandCapacity,
@@ -119,6 +123,8 @@ func newTimer(cfg options) (*Timer, error) {
 		backpressurePolicy:    cfg.backpressurePolicy,
 		expiredTaskPolicy:     cfg.expiredTaskPolicy,
 		expiredTaskRetryDelay: cfg.expiredTaskRetryDelay,
+		metricSink:            cfg.metricSink,
+		metricReportInterval:  cfg.metricReportInterval,
 		bossPool:              bossPool,
 		workerPool:            workerPool,
 		ownBossPool:           ownBossPool,
@@ -129,7 +135,11 @@ func newTimer(cfg options) (*Timer, error) {
 		schedulerDone:         make(chan struct{}),
 		delayQueue:            timingwheel.NewBucketDelayQueue(),
 		clock:                 timingwheel.RealClock{},
-	}, nil
+	}
+	if cfg.metricSink != nil {
+		timer.metricReporterDone = make(chan struct{})
+	}
+	return timer, nil
 }
 
 func (t *Timer) startScheduler() error {
@@ -208,7 +218,12 @@ func (t *Timer) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 
-	return t.closeOwnedPools(ctx)
+	reporterErr := t.waitMetricReporter(ctx)
+	poolErr := t.closeOwnedPools(ctx)
+	if reporterErr != nil {
+		return reporterErr
+	}
+	return poolErr
 }
 
 // closeOwnedPools shuts down only pools created by New.

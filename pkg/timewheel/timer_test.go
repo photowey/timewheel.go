@@ -61,6 +61,55 @@ func (tc timerExecutorOptionCase) run(t *testing.T) {
 	}
 }
 
+type recordingTimerMetricSink struct {
+	observed  atomic.Int64
+	scheduled atomic.Int64
+}
+
+func (sink *recordingTimerMetricSink) ObserveTimerMetrics(metrics Metrics) {
+	sink.observed.Add(1)
+	sink.scheduled.Store(metrics.ScheduledTimeouts)
+}
+
+type panickingTimerMetricSink struct {
+	observed atomic.Int64
+}
+
+func (sink *panickingTimerMetricSink) ObserveTimerMetrics(Metrics) {
+	sink.observed.Add(1)
+	panic("timer metric sink panic")
+}
+
+type timerMetricReleaseSignal struct {
+	done       chan struct{}
+	isReleased atomic.Bool
+}
+
+func newTimerMetricReleaseSignal() *timerMetricReleaseSignal {
+	return &timerMetricReleaseSignal{
+		done: make(chan struct{}),
+	}
+}
+
+func (signal *timerMetricReleaseSignal) Release() {
+	if signal.isReleased.CompareAndSwap(false, true) {
+		close(signal.done)
+	}
+}
+
+type blockingTimerMetricSink struct {
+	entered     chan<- struct{}
+	release     <-chan struct{}
+	enteredOnce atomic.Bool
+}
+
+func (sink *blockingTimerMetricSink) ObserveTimerMetrics(Metrics) {
+	if sink.enteredOnce.CompareAndSwap(false, true) {
+		close(sink.entered)
+	}
+	<-sink.release
+}
+
 type noopTimerTask struct{}
 
 func (noopTimerTask) Run(context.Context) {}
@@ -195,6 +244,49 @@ func (check panickedTimeoutsEqualCheck) ready() bool {
 	return check.timer.Metrics().PanickedTimeouts == check.want
 }
 
+type timerMetricScheduledCheck struct {
+	sink *recordingTimerMetricSink
+	min  int64
+}
+
+func (check timerMetricScheduledCheck) ready() bool {
+	return check.sink.scheduled.Load() >= check.min
+}
+
+type timerMetricObservedCheck struct {
+	sink *panickingTimerMetricSink
+	min  int64
+}
+
+func (check timerMetricObservedCheck) ready() bool {
+	return check.sink.observed.Load() >= check.min
+}
+
+type timerMetricReporterDoneCheck struct {
+	timer *Timer
+}
+
+func (check timerMetricReporterDoneCheck) ready() bool {
+	select {
+	case <-check.timer.metricReporterDone:
+		return true
+	default:
+		return false
+	}
+}
+
+type timerOwnedPoolsClosedCheck struct {
+	timer *Timer
+}
+
+func (check timerOwnedPoolsClosedCheck) ready() bool {
+	bossErr := check.timer.bossPool.TryExecute(closeExecutorTask{done: make(chan struct{})})
+	workerErr := check.timer.workerPool.TryExecute(closeExecutorTask{done: make(chan struct{})})
+
+	return errors.Is(bossErr, executor.ErrClosed) &&
+		errors.Is(workerErr, executor.ErrClosed)
+}
+
 type blockedPoolControl struct {
 	t            *testing.T
 	pool         *executor.Pool
@@ -276,6 +368,14 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		{
 			name: "zero retry delay",
 			opts: []Option{WithExpiredTaskRetryDelay(0)},
+		},
+		{
+			name: "nil metric sink",
+			opts: []Option{WithMetricSink(nil)},
+		},
+		{
+			name: "zero metric report interval",
+			opts: []Option{WithMetricReportInterval(0)},
 		},
 	}
 
@@ -475,6 +575,139 @@ func TestTimerMetricsSnapshotIsImmutable(t *testing.T) {
 		again.MaxBucketDelay == 42 {
 		t.Fatalf("metrics snapshot mutated timer state: %#v", again)
 	}
+}
+
+func TestTimerMetricSinkObservesSnapshots(t *testing.T) {
+	sink := &recordingTimerMetricSink{}
+	timer, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer shutdownTimer(t, timer)
+
+	done := make(chan struct{})
+	if _, err := timer.Schedule(t.Context(), 0, closeTimerTask{done: done}); err != nil {
+		t.Fatalf("Schedule() error = %v", err)
+	}
+	waitForClose(t, done, "task did not run")
+
+	check := timerMetricScheduledCheck{
+		sink: sink,
+		min:  1,
+	}
+	waitUntil(t, check, "metric sink did not observe scheduled timeout")
+}
+
+func TestTimerMetricSinkPanicDoesNotStopReporter(t *testing.T) {
+	sink := &panickingTimerMetricSink{}
+	timer, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer shutdownTimer(t, timer)
+
+	check := timerMetricObservedCheck{
+		sink: sink,
+		min:  2,
+	}
+	waitUntil(t, check, "metric sink panic stopped the reporter")
+}
+
+func TestTimerMetricSinkReporterStopsOnShutdown(t *testing.T) {
+	sink := &recordingTimerMetricSink{}
+	timer, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if timer.metricReporterDone == nil {
+		t.Fatal("metricReporterDone is nil")
+	}
+	if err := timer.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	check := timerMetricReporterDoneCheck{timer: timer}
+	waitUntil(t, check, "metric reporter did not stop after shutdown")
+}
+
+func TestTimerShutdownWaitsForMetricSink(t *testing.T) {
+	release := newTimerMetricReleaseSignal()
+	defer release.Release()
+
+	entered := make(chan struct{})
+	sink := &blockingTimerMetricSink{
+		entered: entered,
+		release: release.done,
+	}
+	timer, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	waitForClose(t, entered, "metric sink was not entered")
+
+	errc := make(chan error, 1)
+	shutdownOp := shutdownAsync{
+		timer: timer,
+		ctx:   t.Context(),
+		errc:  errc,
+	}
+	go shutdownOp.run()
+
+	select {
+	case err := <-errc:
+		release.Release()
+		t.Fatalf("Shutdown() returned before metric sink released: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	release.Release()
+	if err := <-errc; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+}
+
+func TestTimerShutdownClosesOwnedPoolsWhenMetricSinkWaitTimesOut(t *testing.T) {
+	release := newTimerMetricReleaseSignal()
+	defer release.Release()
+
+	entered := make(chan struct{})
+	sink := &blockingTimerMetricSink{
+		entered: entered,
+		release: release.done,
+	}
+	timer, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	waitForClose(t, entered, "metric sink was not entered")
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	defer cancel()
+	err = timer.Shutdown(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+	}
+
+	check := timerOwnedPoolsClosedCheck{timer: timer}
+	waitUntil(t, check, "owned pools were not closed after metric sink wait timeout")
 }
 
 func TestTimerDoesNotCloseCallerOwnedBossPool(t *testing.T) {

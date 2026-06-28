@@ -30,6 +30,55 @@ func (handler countPanicHandler) HandlePanic(any) {
 	handler.count.Add(1)
 }
 
+type recordingPoolMetricSink struct {
+	observed  atomic.Int64
+	submitted atomic.Int64
+}
+
+func (sink *recordingPoolMetricSink) ObservePoolMetrics(metrics Metrics) {
+	sink.observed.Add(1)
+	sink.submitted.Store(metrics.SubmittedTasks)
+}
+
+type panickingPoolMetricSink struct {
+	observed atomic.Int64
+}
+
+func (sink *panickingPoolMetricSink) ObservePoolMetrics(Metrics) {
+	sink.observed.Add(1)
+	panic("pool metric sink panic")
+}
+
+type poolMetricReleaseSignal struct {
+	done       chan struct{}
+	isReleased atomic.Bool
+}
+
+func newPoolMetricReleaseSignal() *poolMetricReleaseSignal {
+	return &poolMetricReleaseSignal{
+		done: make(chan struct{}),
+	}
+}
+
+func (signal *poolMetricReleaseSignal) Release() {
+	if signal.isReleased.CompareAndSwap(false, true) {
+		close(signal.done)
+	}
+}
+
+type blockingPoolMetricSink struct {
+	entered     chan<- struct{}
+	release     <-chan struct{}
+	enteredOnce atomic.Bool
+}
+
+func (sink *blockingPoolMetricSink) ObservePoolMetrics(Metrics) {
+	if sink.enteredOnce.CompareAndSwap(false, true) {
+		close(sink.entered)
+	}
+	<-sink.release
+}
+
 type invalidOptionCase struct {
 	name string
 	opts []Option
@@ -109,6 +158,37 @@ func (check completedTaskCheck) ready() bool {
 	return check.pool.Metrics().CompletedTasks == check.want
 }
 
+type poolMetricSubmittedCheck struct {
+	sink *recordingPoolMetricSink
+	min  int64
+}
+
+func (check poolMetricSubmittedCheck) ready() bool {
+	return check.sink.submitted.Load() >= check.min
+}
+
+type poolMetricObservedCheck struct {
+	sink *panickingPoolMetricSink
+	min  int64
+}
+
+func (check poolMetricObservedCheck) ready() bool {
+	return check.sink.observed.Load() >= check.min
+}
+
+type poolMetricReporterDoneCheck struct {
+	pool *Pool
+}
+
+func (check poolMetricReporterDoneCheck) ready() bool {
+	select {
+	case <-check.pool.metricReporterDone:
+		return true
+	default:
+		return false
+	}
+}
+
 type condition interface {
 	ready() bool
 }
@@ -136,6 +216,14 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 		{
 			name: "unknown reject policy",
 			opts: []Option{WithRejectPolicy(RejectPolicyUnknown)},
+		},
+		{
+			name: "nil metric sink",
+			opts: []Option{WithMetricSink(nil)},
+		},
+		{
+			name: "zero metric report interval",
+			opts: []Option{WithMetricReportInterval(0)},
 		},
 	}
 
@@ -209,6 +297,111 @@ func TestPoolMetricsSnapshotIsImmutable(t *testing.T) {
 	}
 	if again.Workers != 2 {
 		t.Fatalf("Workers = %d, want 2", again.Workers)
+	}
+}
+
+func TestPoolMetricSinkObservesSnapshots(t *testing.T) {
+	sink := &recordingPoolMetricSink{}
+	pool, err := New(
+		WithWorkers(1),
+		WithQueueCapacity(1),
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer shutdownPool(t, pool)
+
+	done := make(chan struct{})
+	if err := pool.Execute(t.Context(), closeTask{done: done}); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	waitForClose(t, done, "task did not run")
+
+	check := poolMetricSubmittedCheck{
+		sink: sink,
+		min:  1,
+	}
+	waitUntil(t, check, "metric sink did not observe submitted task")
+}
+
+func TestPoolMetricSinkPanicDoesNotStopReporter(t *testing.T) {
+	sink := &panickingPoolMetricSink{}
+	pool, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer shutdownPool(t, pool)
+
+	check := poolMetricObservedCheck{
+		sink: sink,
+		min:  2,
+	}
+	waitUntil(t, check, "metric sink panic stopped the reporter")
+}
+
+func TestPoolMetricSinkReporterStopsOnShutdown(t *testing.T) {
+	sink := &recordingPoolMetricSink{}
+	pool, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if pool.metricReporterDone == nil {
+		t.Fatal("metricReporterDone is nil")
+	}
+	if err := pool.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+
+	check := poolMetricReporterDoneCheck{pool: pool}
+	waitUntil(t, check, "metric reporter did not stop after shutdown")
+}
+
+func TestPoolShutdownWaitsForMetricSink(t *testing.T) {
+	release := newPoolMetricReleaseSignal()
+	defer release.Release()
+
+	entered := make(chan struct{})
+	sink := &blockingPoolMetricSink{
+		entered: entered,
+		release: release.done,
+	}
+	pool, err := New(
+		WithMetricSink(sink),
+		WithMetricReportInterval(time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	waitForClose(t, entered, "metric sink was not entered")
+
+	errc := make(chan error, 1)
+	shutdownOp := shutdownAsync{
+		pool: pool,
+		ctx:  t.Context(),
+		errc: errc,
+	}
+	go shutdownOp.run()
+
+	select {
+	case err := <-errc:
+		release.Release()
+		t.Fatalf("Shutdown() returned before metric sink released: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	release.Release()
+	if err := <-errc; err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
 	}
 }
 

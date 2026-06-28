@@ -18,4 +18,7 @@
 // A Pool accepts Task values, runs them on a fixed worker set, and applies the
 // configured reject policy when the queue is full. Worker boundaries recover
 // panics, update metrics, and keep the pool alive for later tasks.
+//
+// Metrics are available through Metrics. Configure WithMetricSink to push
+// periodic snapshots to application-owned observability adapters.
 package executor

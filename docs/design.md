@@ -102,6 +102,13 @@ func (t *Timer) Schedule(
 func (t *Timer) Shutdown(ctx context.Context) error
 func (t *Timer) Metrics() Metrics
 func (t *Timer) Size() int64
+
+type MetricSink interface {
+    ObserveTimerMetrics(Metrics)
+}
+
+func WithMetricSink(sink MetricSink) Option
+func WithMetricReportInterval(interval time.Duration) Option
 ```
 
 `Schedule` uses `ctx` for command enqueue and backpressure waiting. Timeout
@@ -250,6 +257,13 @@ func (p *Pool) Execute(ctx context.Context, task Task) error
 func (p *Pool) TryExecute(task Task) error
 func (p *Pool) Shutdown(ctx context.Context) error
 func (p *Pool) Metrics() Metrics
+
+type MetricSink interface {
+    ObservePoolMetrics(Metrics)
+}
+
+func WithMetricSink(sink MetricSink) Option
+func WithMetricReportInterval(interval time.Duration) Option
 ```
 
 `Execute` follows the configured reject policy. `TryExecute` returns
@@ -565,6 +579,12 @@ Workers
 ```
 
 Metrics return immutable point-in-time snapshots.
+
+Metric sinks are optional push adapters. When configured, the timer or executor
+starts one reporter goroutine that periodically reads `Metrics()` and passes the
+snapshot to the sink. Sink callbacks are not called from scheduling, bucket, or
+worker hot paths. Sink panics are recovered so observability code cannot stop
+the timer or executor. Sink implementations must be fast and concurrency-safe.
 
 ## Testing
 

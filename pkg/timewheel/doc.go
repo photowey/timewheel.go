@@ -22,4 +22,7 @@
 // Use New without options for the built-in pools, or inject caller-owned pools
 // with WithBossPool and WithWorkerPool when the application already owns its
 // execution resources.
+//
+// Metrics are available through Metrics. Configure WithMetricSink to push
+// periodic snapshots to application-owned observability adapters.
 package timewheel

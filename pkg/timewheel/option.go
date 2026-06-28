@@ -23,10 +23,11 @@ import (
 )
 
 const (
-	defaultTick            = time.Millisecond
-	defaultBucketCount     = 512
-	defaultCommandCapacity = 65_536
-	defaultMaxPending      = 1_000_000
+	defaultTick                 = time.Millisecond
+	defaultBucketCount          = 512
+	defaultCommandCapacity      = 65_536
+	defaultMaxPending           = 1_000_000
+	defaultMetricReportInterval = 10 * time.Second
 )
 
 // Option configures a Timer.
@@ -50,6 +51,8 @@ type options struct {
 	backpressurePolicy    BackpressurePolicy
 	expiredTaskPolicy     ExpiredTaskPolicy
 	expiredTaskRetryDelay time.Duration
+	metricSink            MetricSink
+	metricReportInterval  time.Duration
 
 	bossOptions   []executor.Option
 	workerOptions []executor.Option
@@ -68,6 +71,7 @@ func defaultOptions() options {
 		backpressurePolicy:    BackpressureReject,
 		expiredTaskPolicy:     ExpiredTaskReject,
 		expiredTaskRetryDelay: defaultTick,
+		metricReportInterval:  defaultMetricReportInterval,
 		bossOptions: []executor.Option{
 			executor.WithName("timewheel-boss"),
 			executor.WithWorkers(1),
@@ -190,6 +194,38 @@ func (opt expiredTaskRetryDelayOption) apply(o *options) error {
 // WithExpiredTaskRetryDelay sets the delay used when ExpiredTaskRetry reschedules a timeout.
 func WithExpiredTaskRetryDelay(delay time.Duration) Option {
 	return expiredTaskRetryDelayOption(delay)
+}
+
+type metricSinkOption struct {
+	sink MetricSink
+}
+
+func (opt metricSinkOption) apply(o *options) error {
+	if opt.sink == nil {
+		return fmt.Errorf("timewheel: validate metric sink: %w", ErrInvalid)
+	}
+	o.metricSink = opt.sink
+	return nil
+}
+
+// WithMetricSink sets the optional sink for periodic timer metric snapshots.
+func WithMetricSink(sink MetricSink) Option {
+	return metricSinkOption{sink: sink}
+}
+
+type metricReportIntervalOption time.Duration
+
+func (opt metricReportIntervalOption) apply(o *options) error {
+	if opt <= 0 {
+		return fmt.Errorf("timewheel: validate metric report interval: %w", ErrInvalid)
+	}
+	o.metricReportInterval = time.Duration(opt)
+	return nil
+}
+
+// WithMetricReportInterval sets how often a configured MetricSink receives snapshots.
+func WithMetricReportInterval(interval time.Duration) Option {
+	return metricReportIntervalOption(interval)
 }
 
 type bossOptionsOption struct {

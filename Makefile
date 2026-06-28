@@ -84,6 +84,7 @@ examples:
 	$(GO) run ./examples/cancel
 	$(GO) run ./examples/custom_pools
 	$(GO) run ./examples/backpressure
+	$(GO) run ./examples/metrics
 
 .PHONY: bench-smoke
 bench-smoke:
