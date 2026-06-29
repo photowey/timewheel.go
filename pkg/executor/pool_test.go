@@ -218,6 +218,10 @@ func TestNewRejectsInvalidOptions(t *testing.T) {
 			opts: []Option{WithRejectPolicy(RejectPolicyUnknown)},
 		},
 		{
+			name: "nil option",
+			opts: []Option{nil},
+		},
+		{
 			name: "nil metric sink",
 			opts: []Option{WithMetricSink(nil)},
 		},

@@ -71,7 +71,10 @@ func (task schedulerTask) Run() {
 func New(opts ...Option) (*Timer, error) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
-		if err := opt.apply(&cfg); err != nil {
+		if opt == nil {
+			return nil, fmt.Errorf("timewheel: validate option: %w", ErrInvalid)
+		}
+		if err := opt(&cfg); err != nil {
 			return nil, err
 		}
 	}

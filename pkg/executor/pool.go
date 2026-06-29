@@ -49,7 +49,10 @@ type Pool struct {
 func New(opts ...Option) (*Pool, error) {
 	cfg := defaultOptions()
 	for _, opt := range opts {
-		if err := opt.apply(&cfg); err != nil {
+		if opt == nil {
+			return nil, fmt.Errorf("executor: validate option: %w", ErrInvalid)
+		}
+		if err := opt(&cfg); err != nil {
 			return nil, err
 		}
 	}

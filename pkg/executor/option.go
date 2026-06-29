@@ -27,9 +27,7 @@ const (
 )
 
 // Option configures a Pool.
-type Option interface {
-	apply(*options) error
-}
+type Option func(*options) error
 
 type options struct {
 	name          string
@@ -52,110 +50,78 @@ func defaultOptions() options {
 	}
 }
 
-type nameOption string
-
-func (opt nameOption) apply(o *options) error {
-	if opt == "" {
-		return fmt.Errorf("executor: validate name: %w", ErrInvalid)
-	}
-	o.name = string(opt)
-	return nil
-}
-
 // WithName sets the pool name.
 func WithName(name string) Option {
-	return nameOption(name)
-}
-
-type workersOption int
-
-func (opt workersOption) apply(o *options) error {
-	if opt <= 0 {
-		return fmt.Errorf("executor: validate workers: %w", ErrInvalid)
+	return func(o *options) error {
+		if name == "" {
+			return fmt.Errorf("executor: validate name: %w", ErrInvalid)
+		}
+		o.name = name
+		return nil
 	}
-	o.workers = int(opt)
-	return nil
 }
 
 // WithWorkers sets the fixed worker count.
 func WithWorkers(workers int) Option {
-	return workersOption(workers)
-}
-
-type queueCapacityOption int
-
-func (opt queueCapacityOption) apply(o *options) error {
-	if opt < 0 {
-		return fmt.Errorf("executor: validate queue capacity: %w", ErrInvalid)
+	return func(o *options) error {
+		if workers <= 0 {
+			return fmt.Errorf("executor: validate workers: %w", ErrInvalid)
+		}
+		o.workers = workers
+		return nil
 	}
-	o.queueCapacity = int(opt)
-	return nil
 }
 
 // WithQueueCapacity sets the bounded task queue capacity.
 func WithQueueCapacity(capacity int) Option {
-	return queueCapacityOption(capacity)
-}
-
-type rejectPolicyOption RejectPolicy
-
-func (opt rejectPolicyOption) apply(o *options) error {
-	switch policy := RejectPolicy(opt); policy {
-	case RejectPolicyReject, RejectPolicyBlock:
-		o.rejectPolicy = policy
+	return func(o *options) error {
+		if capacity < 0 {
+			return fmt.Errorf("executor: validate queue capacity: %w", ErrInvalid)
+		}
+		o.queueCapacity = capacity
 		return nil
-	default:
-		return fmt.Errorf("executor: validate reject policy: %w", ErrInvalid)
 	}
 }
 
 // WithRejectPolicy sets queue-full behavior.
 func WithRejectPolicy(policy RejectPolicy) Option {
-	return rejectPolicyOption(policy)
-}
-
-type panicHandlerOption struct {
-	handler PanicHandler
-}
-
-func (opt panicHandlerOption) apply(o *options) error {
-	o.panicHandler = opt.handler
-	return nil
+	return func(o *options) error {
+		switch policy {
+		case RejectPolicyReject, RejectPolicyBlock:
+			o.rejectPolicy = policy
+			return nil
+		default:
+			return fmt.Errorf("executor: validate reject policy: %w", ErrInvalid)
+		}
+	}
 }
 
 // WithPanicHandler sets the callback invoked after worker panic recovery.
 func WithPanicHandler(handler PanicHandler) Option {
-	return panicHandlerOption{handler: handler}
-}
-
-type metricSinkOption struct {
-	sink MetricSink
-}
-
-func (opt metricSinkOption) apply(o *options) error {
-	if opt.sink == nil {
-		return fmt.Errorf("executor: validate metric sink: %w", ErrInvalid)
+	return func(o *options) error {
+		o.panicHandler = handler
+		return nil
 	}
-	o.metricSink = opt.sink
-	return nil
 }
 
 // WithMetricSink sets the optional sink for periodic pool metric snapshots.
 func WithMetricSink(sink MetricSink) Option {
-	return metricSinkOption{sink: sink}
-}
-
-type metricReportIntervalOption time.Duration
-
-func (opt metricReportIntervalOption) apply(o *options) error {
-	if opt <= 0 {
-		return fmt.Errorf("executor: validate metric report interval: %w", ErrInvalid)
+	return func(o *options) error {
+		if sink == nil {
+			return fmt.Errorf("executor: validate metric sink: %w", ErrInvalid)
+		}
+		o.metricSink = sink
+		return nil
 	}
-	o.metricReportInterval = time.Duration(opt)
-	return nil
 }
 
 // WithMetricReportInterval sets how often a configured MetricSink receives snapshots.
 func WithMetricReportInterval(interval time.Duration) Option {
-	return metricReportIntervalOption(interval)
+	return func(o *options) error {
+		if interval <= 0 {
+			return fmt.Errorf("executor: validate metric report interval: %w", ErrInvalid)
+		}
+		o.metricReportInterval = interval
+		return nil
+	}
 }
