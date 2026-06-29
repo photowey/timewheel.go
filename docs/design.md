@@ -33,6 +33,7 @@ The library exposes two public packages:
 │   │   ├── task.go
 │   │   ├── option.go
 │   │   ├── metrics.go
+│   │   ├── metric_sink.go
 │   │   ├── reject_policy.go
 │   │   ├── panic_handler.go
 │   │   └── errors.go
@@ -45,6 +46,7 @@ The library exposes two public packages:
 │       ├── task.go
 │       ├── timeout.go
 │       ├── metrics.go
+│       ├── metric_sink.go
 │       ├── backpressure.go
 │       └── errors.go
 └── internal
@@ -513,8 +515,9 @@ Expiration:
 4. Drain accepted schedule commands.
 5. Mark undispatched scheduled entries as cancelled and release pending quota.
 6. Wait for the scheduler loop to exit.
-7. Shut down timer-owned pools.
-8. Leave caller-owned pools running.
+7. Wait for a configured metric reporter to exit.
+8. Shut down timer-owned pools.
+9. Leave caller-owned pools running.
 
 `Pool.Shutdown(ctx)`:
 
@@ -522,6 +525,7 @@ Expiration:
 2. Close the task queue from the producer side.
 3. Let workers drain accepted tasks.
 4. Wait for workers to exit or return `ctx.Err()`.
+5. Wait for a configured metric reporter to exit.
 
 Shutdown is idempotent.
 
